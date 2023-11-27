@@ -1,33 +1,40 @@
-import threading
 import cv2
 import time
-from GRU import *
 import torch
 import mediapipe as mp
 import numpy as np
-import requests
 import flask
 import json
-from flask import request
+from flask import Flask, request
+from flask import Response
+from flask_cors import *
 
-class Identify:
-    def __init__(self):
-        # self.win = win
-        self.isEnd = False
+'''
+flask： web框架，通过flask提供的装饰器@server.route()将普通函数转换为服务
+登录接口，需要传url、username、passwd
+'''
 
-    def start(self):
-        threading.Thread(target=self.run).start()
+# 创建Flask对象app并初始化，把当前这个python文件当做一个服务
+app = Flask(__name__)
+# CORS(app, supports_credentials=True)
 
-    def run(self):
-        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)  # 摄像头图像采集
-        movement = {0: "点击", 1: "平移", 2: "缩放", 3: "抓取", 4: "旋转", 5: "无", 6: "截图", 7:'放大'}
+@app.route('/capture')
+@cross_origin()
+def capture():
+    user_id = request.args.get('user_id')
+    print(user_id)
+
+    def eventStream():
+        id = 0
+        # 摄像头图像采集
+        cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        movement = {0: "点击", 1: "平移", 2: "缩放", 3: "抓取", 4: "旋转", 5: "无", 6: "截图", 7: '放大'}
         S = 0  # 每帧的处理时间
         device = torch.device('cpu')  # 初始化于cpu上处理
         if torch.cuda.is_available():  # 判断是否能使用cuda
             device = torch.device('cuda:0')
 
         model = torch.load(r'model.pt', map_location='cuda:0').to(device)  # 载入模型
-        # print(model)
         hiddem_dim = 30  # 隐藏层大小
         num_layers = 2  # GRU层数
 
@@ -39,7 +46,7 @@ class Identify:
 
         mp_drawing = mp.solutions.drawing_utils  # 坐标点绘制工具
         mp_hands = mp.solutions.hands
-        ratio = self.cap.get(4) / self.cap.get(3)  # 高宽比
+        # ratio = cap.get(4) / cap.get(3)  # 高宽比
 
         with mp_hands.Hands(
                 static_image_mode=False,
@@ -48,20 +55,16 @@ class Identify:
                 min_tracking_confidence=0.5) as hands:
             start_time = time.time()  # 初始化当前帧帧起始时间
 
-            while self.cap.isOpened():
-                if self.isEnd:
-                    break
-                # self.win.eventRunning.wait()
-
-                in_dim = torch.zeros(126)  # 使得一开始的帧为全0
-
+            while cap.isOpened():
+                # 使得一开始的帧为全0
+                in_dim = torch.zeros(126)
                 # 判断是否满足当前帧率
                 wait_time = S - (time.time() - start_time)
                 if wait_time > 0:
                     time.sleep(wait_time)
                 start_time = time.time()  # 重置起始时间
 
-                success, image = self.cap.read()  # 获取摄像头输出
+                success, image = cap.read()  # 获取摄像头输出
                 image = cv2.cvtColor(cv2.flip(image, 1), cv2.COLOR_BGR2RGB)
 
                 image.flags.writeable = False
@@ -146,22 +149,21 @@ class Identify:
                 confidence, rel = rel.max(1)
 
                 # 对每个动作设置单独的置信度阈值
-                cfd = {'点击': 0.80, '平移': 0.90, '缩放': 0.80, '抓取': 0.98, '旋转': 0.90, '无': 0, '截图': 0.80, '放大': 0.92}
+                cfd = {'点击': 0.80, '平移': 0.90, '缩放': 0.80, '抓取': 0.98, '旋转': 0.90, '无': 0, '截图': 0.80,
+                       '放大': 0.92}
                 if confidence > cfd[movement[rel.item()]]:  # 超过阈值的动作将会被输出
                     now_gesture = last_gesture
                     last_gesture = movement[rel.item()]
                     if not (now_gesture == last_gesture):  # 判断是否与上次的输出相同，若相同则不输出
                         if time.time() - prin_time > 2:  # 若距离上次输出时间小于2秒，则不输出
+                            id += 1
                             print(movement[rel.item()], ' \t置信度：', round(confidence.item(), 2))
-                            # self.win.set_gesture(movement[rel.item()])
                             prin_time = time.time()  # 重置输出时间
                             h_t = torch.zeros(num_layers, 1, hiddem_dim).to(device)  # 将当前的h_t重置
-        self.cap.release()
+                            yield 'id: {}\nevent: ges\ndata: {}\n\n'.format(id, last_gesture)
 
-    def break_loop(self):
-        self.isEnd = True
+    return Response(eventStream(), mimetype="text/event-stream")
 
 
 if __name__ == "__main__":
-    identify = Identify()
-    identify.run()
+    app.run()
